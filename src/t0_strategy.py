@@ -1,15 +1,14 @@
 """
-T0 策略模块
+T0 策略模块 - 完整版
 
 支持手动 T0 交易的策略执行和监控
 """
 
-import pandas as pd
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
-from .position_calc import T0Position
+from .position_calc import T0Position, Position
 
 
 @dataclass
@@ -47,17 +46,27 @@ class T0Strategy:
     1. 生成 T0 交易信号
     2. 监控 T0 执行状态
     3. 计算 T0 收益
+    4. 底仓管理
     """
     
-    def __init__(self):
+    # 默认策略参数
+    DEFAULT_PARAMS = {
+        'sell_premium': 0.002,  # 卖出溢价 0.2%
+        'buy_discount': 0.002,  # 买入折价 0.2%
+        'min_t0_volume': 100,  # 最小 T0 数量
+        'max_t0_ratio': 0.5,  # 最大 T0 比例（相对于底仓）
+    }
+    
+    def __init__(self, params: Optional[Dict] = None):
+        self.params = {**self.DEFAULT_PARAMS, **(params or {})}
         self.signals: List[T0Signal] = []
         self.executed_signals: List[T0Signal] = []
-        
+    
     def generate_signals(
         self,
         t0_positions: Dict[str, T0Position],
         prices: Dict[str, float],
-        strategy_params: Optional[Dict] = None
+        positions: Optional[Dict[str, Position]] = None
     ) -> List[T0Signal]:
         """
         生成 T0 交易信号
@@ -65,13 +74,12 @@ class T0Strategy:
         Args:
             t0_positions: T0 仓位字典
             prices: 当前价格字典
-            strategy_params: 策略参数
-            
+            positions: 普通仓位字典（用于底仓检查）
+        
         Returns:
             T0Signal 列表
         """
         self.signals = []
-        params = strategy_params or {}
         
         for key, pos in t0_positions.items():
             stock_code = pos.stock_code
@@ -79,59 +87,75 @@ class T0Strategy:
             
             # 策略 1: T0 待完成配对
             if pos.t0_pending > 0:
-                if pos.t0_buy_volume > pos.t0_sell_volume:
-                    # 买入多了，需要卖出
-                    signal = T0Signal(
-                        stock_code=stock_code,
-                        account_id=pos.account_id,
-                        strategy=pos.strategy,
-                        signal_type='SELL',
-                        target_volume=pos.t0_pending,
-                        target_price=current_price * (1 + params.get('sell_premium', 0.002)),
-                        reason=f"T0 待完成：买入{pos.t0_buy_volume} > 卖出{pos.t0_sell_volume}",
-                        priority=2,
-                        created_at=datetime.now().isoformat()
-                    )
-                    self.signals.append(signal)
-                else:
-                    # 卖出多了，需要买入回补
-                    signal = T0Signal(
-                        stock_code=stock_code,
-                        account_id=pos.account_id,
-                        strategy=pos.strategy,
-                        signal_type='BUY',
-                        target_volume=pos.t0_pending,
-                        target_price=current_price * (1 - params.get('buy_discount', 0.002)),
-                        reason=f"T0 待完成：卖出{pos.t0_sell_volume} > 买入{pos.t0_buy_volume}",
-                        priority=2,
-                        created_at=datetime.now().isoformat()
-                    )
-                    self.signals.append(signal)
+                self._generate_pending_signals(pos, current_price)
             
             # 策略 2: 底仓做 T
-            if pos.base_volume > 0:
-                # 检查是否有足够的可用仓位做 T
-                available_for_t0 = pos.base_volume - pos.t0_buy_volume
-                
-                if available_for_t0 > 100:  # 至少 100 股
-                    # 生成高抛信号
-                    signal = T0Signal(
-                        stock_code=stock_code,
-                        account_id=pos.account_id,
-                        strategy=pos.strategy,
-                        signal_type='SELL',
-                        target_volume=min(available_for_t0, 1000),  # 最多 1000 股
-                        target_price=current_price * (1 + params.get('sell_premium', 0.002)),
-                        reason=f"底仓做 T：可用{available_for_t0}股",
-                        priority=3,
-                        created_at=datetime.now().isoformat()
-                    )
-                    self.signals.append(signal)
+            if positions:
+                pos_key = f"{stock_code}_{pos.account_id}_{pos.strategy}"
+                if pos_key in positions:
+                    base_pos = positions[pos_key]
+                    self._generate_base_t0_signals(base_pos, pos, current_price)
         
         # 按优先级排序
         self.signals.sort(key=lambda x: x.priority)
         
         return self.signals
+    
+    def _generate_pending_signals(self, t0_pos: T0Position, current_price: float):
+        """生成待完成配对信号"""
+        if t0_pos.t0_buy_volume > t0_pos.t0_sell_volume:
+            # 买入多了，需要卖出
+            signal = T0Signal(
+                stock_code=t0_pos.stock_code,
+                account_id=t0_pos.account_id,
+                strategy=t0_pos.strategy,
+                signal_type='SELL',
+                target_volume=t0_pos.t0_pending,
+                target_price=current_price * (1 + self.params['sell_premium']),
+                reason=f"T0 待完成：买入{t0_pos.t0_buy_volume} > 卖出{t0_pos.t0_sell_volume}",
+                priority=2,
+                created_at=datetime.now().isoformat()
+            )
+            self.signals.append(signal)
+        else:
+            # 卖出多了，需要买入回补
+            signal = T0Signal(
+                stock_code=t0_pos.stock_code,
+                account_id=t0_pos.account_id,
+                strategy=t0_pos.strategy,
+                signal_type='BUY',
+                target_volume=t0_pos.t0_pending,
+                target_price=current_price * (1 - self.params['buy_discount']),
+                reason=f"T0 待完成：卖出{t0_pos.t0_sell_volume} > 买入{t0_pos.t0_buy_volume}",
+                priority=2,
+                created_at=datetime.now().isoformat()
+            )
+            self.signals.append(signal)
+    
+    def _generate_base_t0_signals(self, base_pos: Position, t0_pos: T0Position, current_price: float):
+        """生成底仓做 T 信号"""
+        # 检查是否有足够的可用仓位做 T
+        available_for_t0 = base_pos.available_volume - t0_pos.t0_buy_volume
+        
+        if available_for_t0 >= self.params['min_t0_volume']:
+            # 计算最大 T0 数量
+            max_t0_volume = int(base_pos.total_volume * self.params['max_t0_ratio'])
+            target_volume = min(available_for_t0, max_t0_volume, 1000)  # 最多 1000 股
+            
+            if target_volume >= self.params['min_t0_volume']:
+                # 生成高抛信号
+                signal = T0Signal(
+                    stock_code=base_pos.stock_code,
+                    account_id=base_pos.account_id,
+                    strategy=base_pos.strategy,
+                    signal_type='SELL',
+                    target_volume=target_volume,
+                    target_price=current_price * (1 + self.params['sell_premium']),
+                    reason=f"底仓做 T：可用{available_for_t0}股，目标{target_volume}股",
+                    priority=3,
+                    created_at=datetime.now().isoformat()
+                )
+                self.signals.append(signal)
     
     def get_signal_summary(self) -> Dict:
         """获取信号摘要"""

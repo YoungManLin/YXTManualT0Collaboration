@@ -1,5 +1,5 @@
 """
-风险控制模块
+风险控制模块 - 完整版
 
 支持：
 - 仓位限额检查
@@ -10,6 +10,7 @@
 
 from typing import Dict, List, Optional
 from dataclasses import dataclass
+
 from .position_calc import Position
 
 
@@ -46,25 +47,11 @@ class RiskChecker:
     }
     
     def __init__(self, risk_params: Optional[Dict] = None):
-        """
-        初始化风险检查器
-        
-        Args:
-            risk_params: 风险参数配置
-        """
         self.params = {**self.DEFAULT_RISK_PARAMS, **(risk_params or {})}
         self.alerts: List[RiskAlert] = []
     
     def check(self, positions: Dict[str, Position]) -> List[RiskAlert]:
-        """
-        执行风险检查
-        
-        Args:
-            positions: 仓位字典
-            
-        Returns:
-            风险告警列表
-        """
+        """执行风险检查"""
         self.alerts = []
         
         # 1. 总仓位检查
